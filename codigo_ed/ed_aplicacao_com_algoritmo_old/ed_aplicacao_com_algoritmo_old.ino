@@ -1,0 +1,336 @@
+
+#include <lmic.h>
+#include <hal/hal.h>
+
+#include <SPI.h>
+#include <TinyGPS++.h>
+#include <axp20x.h>
+
+#include <iostream>
+#include <string>
+#include <sstream>
+
+#include "flash_memory.h"
+#include "gps.h"
+
+flash_memory flash_memory;
+
+using namespace std;
+
+double latitude, lon, alt;
+TinyGPSPlus gps;
+HardwareSerial GPS(1);
+AXP20X_Class axp;
+uint8_t txBuffer[9];
+uint32_t LatitudeBinary, LongitudeBinary;
+uint16_t altitudeGps;
+uint8_t hdopGps;
+
+unsigned int lenPrefMemory = 100;
+const char * message;
+
+static const u1_t PROGMEM APPEUI[8] = { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }; // APP EUI fornecido pela TTN, colocar em formato de LSB
+void os_getArtEui (u1_t* buf) {
+  memcpy_P(buf, APPEUI, 8);
+}
+
+static const u1_t PROGMEM DEVEUI[8] = { 0xAE, 0x75, 0x04, 0xD0, 0x7E, 0xD5, 0xB3, 0x70 }; // DEV EUI fornecido pela TTN, colocar em formato de LSB
+void os_getDevEui (u1_t* buf) {
+  memcpy_P(buf, DEVEUI, 8);
+}
+
+
+static const u1_t PROGMEM APPKEY[16] = { 0x4A, 0xD3, 0x37, 0xF7, 0xB7, 0x2F, 0xFD, 0x98, 0x78, 0xC2, 0xC3, 0x62, 0x78, 0x47, 0xCB, 0xA0 }; // APP KEY FORNECIDO PELA TTN EM MSB
+void os_getDevKey (u1_t* buf) {
+  memcpy_P(buf, APPKEY, 16);
+}
+
+static osjob_t sendjob;
+
+const unsigned TX_INTERVAL = 13;
+
+// Pinmap ESP32
+const lmic_pinmap lmic_pins = {
+  .nss = 18,
+  .rxtx = LMIC_UNUSED_PIN,
+  .rst = 14,
+  .dio = {26, 33, 32},
+};
+
+void onEvent (ev_t ev) {
+  Serial.print(os_getTime());
+  Serial.print(": ");
+  switch (ev) {
+    case EV_JOINING:
+      Serial.println(F("EV_JOINING"));
+      break;
+    case EV_JOINED:
+      Serial.println(F("EV_JOINED"));
+      {
+        u4_t netid = 0;
+        devaddr_t devaddr = 0;
+        u1_t nwkKey[16];
+        u1_t artKey[16];
+        LMIC_getSessionKeys(&netid, &devaddr, nwkKey, artKey); // FUNÇÃO PARA OBTER AS KEYS DE SESSÃO.
+        Serial.print("netid: ");
+        Serial.println(netid, DEC);
+        Serial.print("devaddr: ");
+        Serial.println(devaddr, HEX);
+        Serial.print("artKey: ");
+        for (int i = 0; i < sizeof(artKey); ++i) {
+          Serial.print(artKey[i], HEX);
+        }
+        Serial.println("");
+        Serial.print("nwkKey: ");
+        for (int i = 0; i < sizeof(nwkKey); ++i) {
+          Serial.print(nwkKey[i], HEX);
+        }
+        Serial.println("");
+      }
+      Serial.println(F("Successful OTAA Join..."));
+
+      LMIC_setLinkCheckMode(0); // Desativa a verificação de validade do link com a rede, só ativar no inicio de uma sessão
+      break;
+
+    case EV_JOIN_FAILED:
+      Serial.println(F("EV_JOIN_FAILED"));
+      break;
+    case EV_REJOIN_FAILED:
+      Serial.println(F("EV_REJOIN_FAILED"));
+      break;
+    case EV_TXCOMPLETE:
+      Serial.println(F("EV_TXCOMPLETE (includes waiting for RX windows)"));
+      if (LMIC.txrxFlags & TXRX_ACK)
+        Serial.println(F("Received ack"));
+      if (LMIC.dataLen) {
+        Serial.print(F("Received "));
+        Serial.print(LMIC.dataLen);
+        Serial.println(F(" bytes of payload"));
+      }
+      // Schedule next transmission
+      os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(TX_INTERVAL), do_send);
+      break;
+
+    case EV_RESET:
+      Serial.println(F("EV_RESET"));
+      break;
+
+    case EV_TXSTART:
+      Serial.println(F("EV_TXSTART"));
+      Serial.println(gps.location.lat());
+      Serial.println(gps.location.lng());
+      
+      // message = "lat: "+gps.location.lat()+ " long: " + gps.location.lng();
+
+      message = "lat:  long: \r\n";
+      LatitudeBinary = ((gps.location.lat() + 90) / 180) * 16777215;
+      LongitudeBinary = ((gps.location.lng() + 180) / 360) * 16777215;
+      
+      //memory.appendFile(SPIFFS, "/log.txt", "lat: ");
+      //memory.appendFileDouble(SPIFFS, "/log.txt", LatitudeBinary);
+      //memory.appendFile(SPIFFS, "/log.txt", " lng:");
+      //memory.appendFileDouble(SPIFFS, "/log.txt", LongitudeBinary);
+      //memory.appendFile(SPIFFS, "/log.txt", " \r\n");
+      break;
+    default:
+      Serial.print(F("Unknown event: "));
+      Serial.println((unsigned) ev);
+      break;
+  }
+}
+
+void do_send(osjob_t* j) {
+  // Verifica se não está ocorrendo uma transmissão no momento TX/RX
+  if (LMIC.opmode & OP_TXRXPEND) {
+    Serial.println(F("OP_TXRXPEND, not sending"));
+  } else {
+
+    if (gps.location.isUpdated())
+    {
+      latitude = gps.location.lat();
+      lon = gps.location.lng();
+    }
+    if (gps.altitude.isUpdated())
+    LatitudeBinary = ((gps.location.lat() + 90) / 180) * 16777215;
+    LongitudeBinary = ((gps.location.lng() + 180) / 360) * 16777215;
+
+    txBuffer[0] = ( LatitudeBinary >> 16 ) & 0xFF;
+    txBuffer[1] = ( LatitudeBinary >> 8 ) & 0xFF;
+    txBuffer[2] = LatitudeBinary & 0xFF;
+
+    txBuffer[3] = ( LongitudeBinary >> 16 ) & 0xFF;
+    txBuffer[4] = ( LongitudeBinary >> 8 ) & 0xFF;
+    txBuffer[5] = LongitudeBinary & 0xFF;
+
+    altitudeGps = gps.altitude.meters();
+    txBuffer[6] = ( altitudeGps >> 8 ) & 0xFF;
+    txBuffer[7] = altitudeGps & 0xFF;
+
+    hdopGps = gps.hdop.hdop() * 10;
+    txBuffer[8] = hdopGps & 0xFF;
+
+
+    LMIC_setTxData2(1, txBuffer, sizeof(txBuffer), 0);
+    txBuffer[8] = hdopGps & 0xFF;
+
+    Serial.print("Latitude : ");
+    Serial.println(gps.location.lat(), 5);
+    Serial.print("Longitude : ");
+    Serial.println(gps.location.lng(), 4);
+    Serial.print("Satellites: ");
+    Serial.println(gps.satellites.value());
+    Serial.print("Altitude  : ");
+    Serial.println(gps.altitude.feet() / 3.2808);
+    Serial.println(F("Packet queued"));
+    Serial.print(F("Sending packet on frequency: "));
+    Serial.println(LMIC.freq);
+
+    flash_memory.save_data(10, gps.location.lat(), gps.location.lng());
+    flash_memory.print_memory();
+    
+//    // Salva os dados de latitude e longitude diretamente na placa
+//    unsigned int counter = preferences.getUInt("counter", 0);
+//    unsigned int counter_save = preferences.getUInt("counter_save", 0);
+//    if ((gps.location.lat() != 0) && (gps.location.lng() != 0)) {
+//      //Salva na memória a cada 4 posições
+//      if (counter_save % 4 == 0) {
+//        Serial.print(F("Data saved: "));
+//        Serial.println(counter_save);
+//        
+//        size_t latLen = preferences.getBytesLength("latitude");
+//        float bufferLat[latLen];
+//        preferences.getBytes("latitude", bufferLat, latLen);
+//        bufferLat[counter] = gps.location.lat();
+//        preferences.putBytes("latitude", bufferLat, lenPrefMemory * sizeof(float));
+//
+//        size_t longLen = preferences.getBytesLength("longitude");
+//        float bufferLong[longLen];
+//        preferences.getBytes("longitude", bufferLong, longLen);
+//        bufferLong[counter] = gps.location.lng();
+//        preferences.putBytes("longitude", bufferLong, lenPrefMemory * sizeof(float));
+//
+//        if (counter < lenPrefMemory) {
+//          counter++;
+//        } else {
+//          counter = 0;
+//        }
+//        Serial.printf(" Current counter value: %u\n", counter);
+//        preferences.putUInt("counter", counter);
+//
+//        counter_save++;
+//        preferences.putUInt("counter_save", counter_save);
+//      
+//      } else {
+//        Serial.print(F("Data not saved: "));
+//        Serial.println(counter_save);
+//        counter_save++;
+//        preferences.putUInt("counter_save", counter_save);
+//      }
+//    }
+  }
+}
+int i = 3;
+
+void setup() {
+  Serial.begin(115200);
+
+//  preferences.begin("my-app", false);
+//  unsigned int counter = preferences.getUInt("counter", 0);
+//  unsigned int counter_save = preferences.getUInt("counter_save", 0);
+//  Para resetar a memória local basta tirar os comentários a seguir, carregar, comentar novamente, e carregar
+//    float latitude[lenPrefMemory] = {0}; // two entries
+//    preferences.putBytes("latitude", latitude, lenPrefMemory*sizeof(float));
+//  
+//    float longitude[lenPrefMemory] = {0}; // two entries
+//    preferences.putBytes("longitude", longitude, lenPrefMemory*sizeof(float));
+//  
+//    counter = 0;
+//    counter_save = 0;
+//    preferences.putUInt("counter", counter);
+//    preferences.putUInt("counter_save", counter_save);
+
+//  Serial.printf("\n Última posição registrada: %d \n", counter);
+//  
+//  // Mostra o que tem armazenado no vetor de latitude
+//  Serial.printf("\n Latitude: \n");
+//  size_t latLen = preferences.getBytesLength("latitude");
+//  float bufferLat[latLen];
+//  preferences.getBytes("latitude", bufferLat, latLen);
+//  Serial.printf("Size lat len %d \n", latLen);
+//
+//  int pos;
+//  int limitVect = sizeof(bufferLat);
+//  Serial.printf("Size of vect lat %d ", limitVect);
+//  for (pos = 0; pos < lenPrefMemory; pos++) {
+//    Serial.printf("Pos: %d ", pos);
+//    Serial.printf("Data: %f ", bufferLat[pos]);
+//  }
+//
+//  // Mostra o que tem armazenado no vetor de longitude
+//  Serial.printf("\n Longitude: \n");
+//  size_t longLen = preferences.getBytesLength("longitude");
+//  float bufferLong[longLen];
+//  preferences.getBytes("longitude", bufferLong, longLen);
+//
+//  Serial.printf("Size long len %d \n", latLen);
+//  limitVect = sizeof(bufferLong);
+//  Serial.printf("Size of vect lat %d ", limitVect);
+//  for (pos = 0; pos < lenPrefMemory; pos++) {
+//    Serial.printf("Pos: %d ", pos);
+//    Serial.printf("Data: %f ", bufferLong[pos]);
+//  }
+//  Serial.printf("\n");
+
+
+  // configurado a comunicação com o axp
+  Wire.begin(21, 22);
+  if (!axp.begin(Wire, AXP192_SLAVE_ADDRESS)) {
+    Serial.println("AXP192 Begin PASS");
+  } else {
+    Serial.println("AXP192 Begin FAIL");
+  }
+  axp.setPowerOutPut(AXP192_LDO2, AXP202_ON);
+  axp.setPowerOutPut(AXP192_LDO3, AXP202_ON);
+  axp.setPowerOutPut(AXP192_DCDC2, AXP202_ON);
+  axp.setPowerOutPut(AXP192_EXTEN, AXP202_ON);
+  axp.setPowerOutPut(AXP192_DCDC1, AXP202_ON);
+  GPS.begin(9600, SERIAL_8N1, 34, 12);  // configurando comunicação com o NEO6.
+  Serial.println(F("Starting"));
+
+#ifdef VCC_ENABLE
+  // For Pinoccio Scout boards
+  pinMode(VCC_ENABLE, OUTPUT);
+  digitalWrite(VCC_ENABLE, HIGH);
+  delay(1000);
+#endif
+
+#if defined(CFG_au921)
+  Serial.println(F("Loading AU915/AU921 Configuration..."));
+#endif
+  
+  flash_memory.init();
+  flash_memory.reset_memory();
+  flash_memory.print_memory();
+  
+  
+  //memory.init();
+  //memory.readFile(SPIFFS, "/log.txt");
+  //memory.deleteFile(SPIFFS, "/log.txt");
+  os_init();
+    
+  LMIC_reset(); // Redefine o estado do MAC
+
+  LMIC_setDrTxpow(DR_SF7, 14); //Definir a potencia de envio e o SF inicial.
+  LMIC_selectSubBand(1);
+  LMIC_setClockError(MAX_CLOCK_ERROR * 1 / 100); // algoritimo de correção de clock.
+
+  // Inicia o OTAA caso não tenha uma sessão ativa e caso tenha envia a msg.
+  do_send(&sendjob);
+}
+
+void loop() {
+
+  os_runloop_once();
+  while (GPS.available())
+    gps.encode(GPS.read());
+}

@@ -1,0 +1,313 @@
+#include <SPI.h>
+#include <LoRa.h>
+#include "FS.h"
+#include "SPIFFS.h"
+#define FORMAT_SPIFFS_IF_FAILED true
+
+
+#include "max6675.h"
+
+int thermoDO =34;
+int thermoCLK = 25;
+
+int thermoCS1 = 12;
+int thermoCS2 = 13;
+int thermoCS3 = 21;
+
+
+MAX6675 thermocouple1(thermoCLK, thermoCS1, thermoDO);
+MAX6675 thermocouple2(thermoCLK, thermoCS2, thermoDO);
+MAX6675 thermocouple3(thermoCLK, thermoCS3, thermoDO);
+
+
+// This is the LoRa Node side sketch for the MQTT example: http://wiki.dragino.com/index.php?title=MQTT_Forward_Instruction#Example_to_communicate_to_a_simple_MQTT_server 
+
+float tem1;
+float tem2;
+float tem3;
+char tem_1[8]={"\0"}, tem_2[8]={"\0"}, tem_3[8]={"\0"},count_1[8]={"\0"};   
+char *node_id = "<8>";  //From LG01 via web Local Channel settings on MQTT.Please refer <> dataformat in here. 
+uint8_t datasend[36];
+unsigned int count = 1; 
+unsigned long new_time,old_time=0;
+#include <U8g2lib.h>   // https://github.com/olikraus/U8g2_Arduino
+
+// I2C OLED Display works with SSD1306 driver
+#define OLED_SDA 4
+#define OLED_SCL 15
+#define OLED_RST 16
+
+U8G2_SSD1306_128X64_NONAME_F_SW_I2C Display(U8G2_R0, /* clock=*/ OLED_SCL, /* data=*/ OLED_SDA, /* reset=*/ OLED_RST); // Full framebuffer, SW I2C
+
+
+// SPI LoRa Radio
+#define LORA_SCK 5        // GPIO5 - SX1276 SCK
+#define LORA_MISO 19     // GPIO19 - SX1276 MISO
+#define LORA_MOSI 27    // GPIO27 -  SX1276 MOSI
+#define LORA_CS 18     // GPIO18 -   SX1276 CS
+#define LORA_RST 14   // GPIO14 -    SX1276 RST
+#define LORA_IRQ 26  // GPIO26 -     SX1276 IRQ (interrupt request)
+
+int totalSize=0;
+bool logger=true;
+
+//Filesystem stuff
+void listDir(fs::FS &fs, const char * dirname, uint8_t levels){
+    totalSize=0;
+    Serial.printf("Listing directory: %s\r\n", dirname);
+
+    File root = fs.open(dirname);
+    if(!root){
+        Serial.println("- failed to open directory");
+        return;
+    }
+    if(!root.isDirectory()){
+        Serial.println(" - not a directory");
+        return;
+    }
+
+    File file = root.openNextFile();
+    while(file){
+        if(file.isDirectory()){
+            Serial.print("  DIR : ");
+            Serial.println(file.name());
+            if(levels){
+                listDir(fs, file.name(), levels -1);
+            }
+        } else {
+            Serial.print("  FILE: ");
+            Serial.print(file.name());
+            Serial.print("\tSIZE: ");
+            Serial.println(file.size());
+            totalSize += file.size();
+        }
+        file = root.openNextFile();
+    }
+}
+
+void readFile(fs::FS &fs, const char * path){
+    Serial.printf("Reading file: %s\r\n", path);
+
+    File file = fs.open(path);
+    if(!file || file.isDirectory()){
+        Serial.println("- failed to open file for reading");
+        return;
+    }
+
+    Serial.println("- read from file:");
+    while(file.available()){
+        Serial.write(file.read());
+    }
+}
+
+void writeFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Writing file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_WRITE);
+    if(!file){
+        Serial.println("- failed to open file for writing");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("- file written");
+    } else {
+        Serial.println("- frite failed");
+    }
+}
+
+
+int getFileSize(fs::FS &fs, const char * path){
+    
+    File file = fs.open(path);
+    if(!file || file.isDirectory()){
+        Serial.println("- failed to open file for reading");
+        return -1;
+    }
+
+    return file.size();
+}
+
+
+void appendFile(fs::FS &fs, const char * path, const char * message){
+    Serial.printf("Appending to file: %s\r\n", path);
+
+    File file = fs.open(path, FILE_APPEND);
+    if(!file){
+        Serial.println("- failed to open file for appending");
+        return;
+    }
+    if(file.print(message)){
+        Serial.println("- message appended");
+    } else {
+        Serial.println("- append failed");
+    }
+}
+
+
+
+
+void setup()
+{
+      Serial.begin(9600);
+      while (!Serial);
+      Serial.println(F("Start MQTT Example"));
+ 
+      // Very important for SPI pin configuration!
+      SPI.begin(LORA_SCK, LORA_MISO, LORA_MOSI, LORA_CS); 
+  
+      // Very important for LoRa Radio pin configuration! 
+      LoRa.setPins(LORA_CS, LORA_RST, LORA_IRQ);        
+      
+      if (!LoRa.begin(915000000))   //868000000 is frequency
+      { 
+          Serial.println("Starting LoRa failed!");
+          while (1);
+      }
+      // Setup Spreading Factor (6 ~ 12)
+      LoRa.setSpreadingFactor(12);
+      
+      // Setup BandWidth, option: 7800,10400,15600,20800,31250,41700,62500,125000,250000,500000
+      //Lower BandWidth for longer distance.
+      LoRa.setSignalBandwidth(125000);
+      
+      // Setup Coding Rate:5(4/5),6(4/6),7(4/7),8(4/8) 
+      LoRa.setCodingRate4(5);
+      LoRa.setSyncWord(52); 
+      LoRa.setPreambleLength(4);
+      //LoRa.setTxPower(17 );
+      //LoRa.setTxPower(20, PA_OUTPUT_RFO_PIN);
+
+      Serial.println("LoRa init succeeded.");
+      
+      //LoRa.onReceive(onReceive);   
+      //LoRa.receive();  
+
+        
+      Display.begin();
+      Display.enableUTF8Print();    // enable UTF8 support for the Arduino print() function
+      Display.setFont(u8g2_font_ncenB08_tr);
+
+      if(!SPIFFS.begin(FORMAT_SPIFFS_IF_FAILED)){
+        Serial.println("SPIFFS Mount Failed");
+        return;
+      }
+    
+      listDir(SPIFFS, "/", 0);    
+      appendFile(SPIFFS, "/log.txt", "NewLog!\r\n");
+      if (totalSize > 1468006) // 1.4*1024*1024, SPIFFS partition almost full, turn off the logger
+         logger=false;
+          
+     
+}
+
+void max6675Temp(){
+    tem1= thermocouple1.readCelsius();
+    tem2= thermocouple2.readCelsius();
+    tem3= thermocouple3.readCelsius();
+    
+}
+
+  
+void max6675Write()
+{
+    char data[100] = "\0";
+    for(int i = 0; i < 8; i++)
+    {
+       data[i] = node_id[i];
+    }
+    tem1= '1';
+    tem2= '2';
+    tem3= '3';
+
+    dtostrf(tem1,0,1,tem_1);
+    dtostrf(tem2,0,1,tem_2);
+    dtostrf(tem3,0,1,tem_3);
+    dtostrf(count, 0,0, count_1);
+    
+    // Serial.println(tem_1);
+     strcat(data,"");
+     strcat(data,tem_1);
+     strcat(data,"&");
+     strcat(data,tem_2);
+     strcat(data,"&");
+     strcat(data,tem_3);
+     strcat(data,"&");
+     strcat(data,tem_3);
+   //  strcat(data,"&");
+   //  strcat(data,count_1);
+     strncpy((char *)datasend,data, 30);
+     
+     //Serial.println((char *)datasend);
+     //Serial.println(sizeof datasend);
+     if ((count % 1000) == 0){
+         if (getFileSize(SPIFFS, "/log.txt") > 1468006) {
+            logger=false;                     
+         }              
+     }
+     if (logger)
+          appendFile(SPIFFS, "/log.txt", data);
+     
+}
+
+
+void SendData()
+{
+
+     LoRa.beginPacket();
+     LoRa.print((char *)datasend);
+     LoRa.endPacket();
+     //Serial.println("Packet Sent");
+}    
+    
+
+
+void loop()
+{
+    new_time=millis();
+    if (new_time - old_time >= 60000 || old_time == 0)
+    {
+      old_time = new_time;
+//      Serial.print("###########    ");
+//      Serial.print("COUNT=");
+//      Serial.print(count);
+//      Serial.print(" temp1=");
+//      Serial.print(tem1);
+//      Serial.print(" temp2=");
+//      Serial.print(tem2);
+//      Serial.print(" temp3=");
+//      Serial.print(tem3);
+//      Serial.println("    ###########");   
+      
+      max6675Temp();
+      max6675Write();
+
+         
+      // Display Info
+      Display.clearBuffer();  
+      Display.setCursor(0,12); Display.print("MQTT #"+(String)count );
+      Display.setCursor(0,24); Display.print("Temp1: " +(String)tem1);
+      Display.setCursor(0,36); Display.print("Temp2: " +(String)tem2);
+      Display.setCursor(0,48); Display.print("Temp3: " +(String)tem3);
+      Display.setCursor(0,60); Display.print("Size: " +(String)totalSize);
+      
+      
+      Display.sendBuffer();      
+
+      SendData();
+      count++;
+
+      LoRa.receive();
+    }
+}
+
+void onReceive(int packetSize) {
+ 
+  // received a packet
+  Serial.print("Received packet : ");
+
+  // read packet
+  for (int i = 0; i < packetSize; i++) {
+      Serial.print((char)LoRa.read());
+  }
+  Serial.print("\n\r");  
+}
