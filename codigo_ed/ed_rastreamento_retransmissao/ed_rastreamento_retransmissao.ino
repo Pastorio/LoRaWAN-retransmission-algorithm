@@ -56,12 +56,13 @@ int count_block = 0;
 int count_retransmission = 0;
 int count_retransmission_block = 0;
 
-
+// CREATE MENSAGEM
 struct mensagem {
   int fcnt;
-  int dado;
+  double latitude;
+  double longitude;
 };
-std::list<mensagem> registro_mensagem;
+std::list<mensagem> list_mensagens;
 
 static osjob_t sendjob;
 
@@ -75,37 +76,6 @@ const lmic_pinmap lmic_pins = {
   .rst = 14,
   .dio = {26, 33, 32},
 };
-
-void send_retransmisao(osjob_t* j, int fcnt_reenviar) {
-  Serial.println("-------DADO REENVIADO-------");
-
-  float latitude, longitude;
-
-  flash_memory.get_data(fcnt_reenviar, &latitude, &longitude);
-  latitude = 10;
-
-  Serial.print(latitude, 6);
-  Serial.print("<- Latitude | Longitude -> ");
-  Serial.println(longitude, 6);
-  gps.buildPacket(txBuffer_send, latitude, longitude);
-  txBuffer_send[9] = fcnt_reenviar & 0xFF;
-
-  Serial.println((String) "Seq Num: " + LMIC.seqnoUp + " " + latitude + " " + longitude);
-  //flash_memory.save_data(LMIC.seqnoUp, latitude, longitude);
-  //flash_memory.print_memory();
-  if (LMIC.opmode & OP_TXRXPEND) {
-    Serial.println(F("OP_TXRXPEND, not sending"));
-  } else {
-    int temp_seqno = LMIC.seqnoUp;
-    LMIC.seqnoUp = fcnt_reenviar;
-    LMIC_setTxData2(1, txBuffer_send, sizeof(txBuffer_send), 0);
-    Serial.println(F("Retransmission packet queued"));
-    Serial.print(F("Sending packet on frequency: "));
-    Serial.println(LMIC.freq);
-    LMIC.seqnoUp = temp_seqno;
-  }
-}
-
 
 void onEvent (ev_t ev) {
   Serial.print(os_getTime());
@@ -170,18 +140,15 @@ void onEvent (ev_t ev) {
         Serial.print(F("Received packet: "));
         Serial.println(LMIC.dataLen);
 
+        //Recebe mensagem de retransmissão
         int fcnt_reenviar;
         for (int i = 0; i < LMIC.dataLen; i = i + 2)
         {
           fcnt_reenviar = ( LMIC.frame[LMIC.dataBeg + i] << 8 ) + LMIC.frame[LMIC.dataBeg + i + 1];
-
-          //Serial.print((String)"SeqNum reenviar: " + fcnt_reenviar);
-
+          Serial.println((String) "fcnt_reenviar: " + fcnt_reenviar);
           //send_retransmisao(&sendjob, fcnt_reenviar);
           list_fcnt_retransmission.push_back(fcnt_reenviar);
         }
-
-
       }
       if (list_fcnt_retransmission.empty()) {
         Serial.println("-------ELSE-------");
@@ -221,61 +188,55 @@ void onEvent (ev_t ev) {
 }
 //Função de agendamento, pode criar a função para agendar
 void do_send(osjob_t* j) {
-//  if (!list_fcnt_retransmission.empty()) {
-//    Serial.println("-------VERIFICA DADO-------");
-//    int fcnt_reenviar = list_fcnt_retransmission.front();
-//
-//    Serial.print((String)"SeqNum reenviar: " + fcnt_reenviar);
-//    list_fcnt_retransmission.pop_front();
-//    
-//    send_retransmisao(&sendjob, fcnt_reenviar);
-//
-//    Serial.println("-------VERIFICA DADO-------");
-//    //os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(10), do_send);
-//    return;
-//  }
-
-
   if (LMIC.opmode & OP_TXRXPEND)
   {
     Serial.println(F("OP_TXRXPEND, not sending"));
   }
   else
   {
-    if (gps.checkGpsFix())
-    {
-
-      Serial.println(F("-- DO SEND-- "));
-      //setOrRestorePersistentCounters();
-      //LMIC.seqnoUp = 10;
-
-      float latitude, longitude;
-      int fcnt_reenviar = 0;
-      //gps.get_coordenates(&latitude, &longitude);
-      if (!list_fcnt_retransmission.empty()) {
-        Serial.println("-------VERIFICA DADO-------");
-        fcnt_reenviar = list_fcnt_retransmission.front();
-        flash_memory.get_data(fcnt_reenviar, &latitude, &longitude);
-        list_fcnt_retransmission.pop_front();
-        //latitude = 10;
-      }else{
-        gps.get_coordenates(&latitude, &longitude);
+    Serial.println(F("-- SEND-- "));
+    float latitude = 0;
+    float longitude = 0;
+    int fcnt_reenviar = 0;
+    
+    // SEND PACKEGE
+    if (!list_fcnt_retransmission.empty()) {
+      Serial.println("---- RETRANSMISSAO ----");
+      fcnt_reenviar = list_fcnt_retransmission.front();
+      // GET MENSAGEM
+      for (std::list<mensagem>::const_iterator it = list_mensagens.begin(), end = list_mensagens.end(); it != end; ++it) {
+        if (fcnt_reenviar == (*it).fcnt) {
+          latitude = (*it).latitude;
+          longitude = (*it).longitude;
+        }
+        //Serial.print((String) "fcnt: " + (*it).fcnt + " " + (*it).latitude + " " + (*it).longitude + " | ") ;
       }
+      list_fcnt_retransmission.pop_front();
+
+      gps.buildPacket(txBuffer_send, latitude, longitude);
+      txBuffer_send[9] = fcnt_reenviar & 0xFF;
+      Serial.println((String) "Seq Num: " + LMIC.seqnoUp + "/" + fcnt_reenviar  + " " + latitude + " " + longitude);
+      LMIC_setTxData2(1, txBuffer_send, sizeof(txBuffer_send), 0);
+    } else if (gps.checkGpsFix()) {
+      Serial.println("---- NOVA MENSAGEM ----");
+      // MENSAGEM GPS
+      gps.get_coordenates(&latitude, &longitude);
+
+      // ADD MENSAGEM
+      struct mensagem msg_atual = {LMIC.seqnoUp, latitude, longitude};
+      list_mensagens.push_back(msg_atual);
+      Serial.print("----LISTA:  ");
+      for (std::list<mensagem>::const_iterator it = list_mensagens.begin(), end = list_mensagens.end(); it != end; ++it) {
+        Serial.print((String) "fcnt: " + (*it).fcnt + " " + (*it).latitude + " " + (*it).longitude + " | ") ;
+      }
+      Serial.println("  :LISTA----");
       
       gps.buildPacket(txBuffer_send, latitude, longitude);
-      txBuffer_send[9] = fcnt_reenviar & 0xFF;  
-      
+      txBuffer_send[9] = fcnt_reenviar & 0xFF;
       Serial.println((String) "Seq Num: " + LMIC.seqnoUp + "/" + fcnt_reenviar  + " " + latitude + " " + longitude);
-      flash_memory.save_data(LMIC.seqnoUp, latitude, longitude);
-      //flash_memory.print_memory();
-
       LMIC_setTxData2(1, txBuffer_send, sizeof(txBuffer_send), 0);
-      //Serial.println(F("Packet queued"));
-      //Serial.println(LMIC.freq); //
-      //digitalWrite(BUILTIN_LED, HIGH);
-    }
-    else
-    {
+    }else{
+      Serial.println("---- MENSAGEM NÃO ENVIADA ----");
       //try again in 3 seconds
       os_setTimedCallback(&sendjob, os_getTime() + sec2osticks(3), do_send);
     }
@@ -307,9 +268,9 @@ void setup() {
   gps.init();
 
   // Memory init
-  flash_memory.init();
-  flash_memory.reset_memory();
-  flash_memory.print_memory();
+  //flash_memory.init();
+  //flash_memory.reset_memory();
+  //flash_memory.print_memory();
 
 #ifdef VCC_ENABLE
   // For Pinoccio Scout boards
