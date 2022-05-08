@@ -67,7 +67,7 @@ std::list<mensagem> list_mensagens;
 static osjob_t sendjob;
 
 // Schedule TX every this many seconds (might become longer due to duty cycle limitations).
-const unsigned TX_INTERVAL = 15;
+const unsigned TX_INTERVAL = 20;
 
 // Pin mapping for TTGO TBeam V1.1
 const lmic_pinmap lmic_pins = {
@@ -120,9 +120,6 @@ void onEvent (ev_t ev) {
         Serial.println("");
       }
       Serial.println(F("Successful OTAA Join..."));
-      // Disable link check validation (automatically enabled
-      // during join, but because slow data rates change max TX
-      // size, we don't use it in this example.
       LMIC_setLinkCheckMode(0);
       break;
     case EV_JOIN_FAILED:
